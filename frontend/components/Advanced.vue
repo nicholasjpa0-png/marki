@@ -1,0 +1,129 @@
+<template>
+    <!-- Advanced Tools -->
+    <section class="advanced-tools-section mb-10">
+        <!-- Header -->
+        <header class="mb-2 flex flex-col items-start justify-between gap-4">
+            <div class="flex flex-row items-center justify-between gap-4 w-full">
+            <h2 id="AdvancedTools" class="m-0 flex min-w-0 flex-1 items-center gap-2 text-xl md:text-3xl font-semibold tracking-tight leading-tight">
+                🧰 {{ t('advancedtools.Title') }}
+            </h2>
+            </div>
+            <div class="text-base text-muted-foreground">
+                <p v-if="!isSimpleMode">{{ t('advancedtools.Note') }}</p>
+            </div>
+        </header>
+
+        <!-- Card groups, one per category (data/tools.js TOOL_CATEGORIES). Each
+             card is a real <a> to /tools/:slug: modified clicks stay the
+             browser's, a plain click / Enter / Space routes in-app. -->
+        <div class="mt-4 space-y-6">
+            <div v-for="group in cardGroups" :key="group.id">
+                <h3 class="mb-3 text-sm font-medium tracking-wide text-muted-foreground">
+                    {{ t(group.titleKey) }}
+                </h3>
+                <div class="grid grid-cols-1 md:grid-cols-4 gap-3">
+                    <Card v-for="card in group.tools" :key="card.slug"
+                        :data-adv-slug="card.slug"
+                        class="keyboard-shortcut-card jn-card jn-adv-card group relative overflow-visible transition-transform duration-300 ease-out hover:-translate-y-1.5 data-[keyboard-hover=true]:ring-2 data-[keyboard-hover=true]:ring-green-500/50">
+                        <a :href="`/tools/${card.slug}`"
+                            class="block cursor-pointer no-underline text-inherit"
+                            @click="onCardClick($event, card.slug)"
+                            @keydown.enter.prevent="openTool(card.slug)"
+                            @keydown.space.prevent="openTool(card.slug)">
+                            <CardContent class="p-4">
+                                <h4 class="text-xl font-medium text-primary mb-2 pr-10">
+                                    <ArrowRight
+                                        class="inline size-[1em] align-[-0.15em] mr-1.5 transition-colors duration-300" />
+                                    {{ t(card.titleKey) }}
+                                </h4>
+                                <!-- Description -->
+                                <p class="text-base text-muted-foreground line-clamp-2 min-h-10">
+                                    {{ t(card.noteKey) }}
+                                </p>
+                                <!-- Top right emoji -->
+                                <EmojiMotion
+                                    :emoji="card.emoji"
+                                    :motion="card.motion"
+                                    :fx="card.fx"
+                                    :tone="card.tone"
+                                    :angle="card.angle"
+                                    trigger=".jn-adv-card"
+                                    class="pointer-events-none absolute top-[0.3rem] right-[0.55rem] size-8 text-[1.6rem]" />
+                            </CardContent>
+                        </a>
+                    </Card>
+                </div>
+            </div>
+        </div>
+
+        <!-- Section banner slot (data-driven; see InfoBanner.vue) -->
+        <InfoBanner section="advanced" />
+    </section>
+</template>
+
+<script setup>
+import { computed, onMounted } from 'vue';
+import { useRouter } from 'vue-router';
+import { useMainStore } from '@/store';
+import { useI18n } from 'vue-i18n';
+import { trackEvent } from '@/utils/analytics';
+import { ADVANCED_TOOLS, groupToolsByCategory } from '@/data/tools.js';
+import { listedTools } from '@/utils/tool-availability.js';
+import { isPlainClick } from '@/utils/nav-target.js';
+import { Card, CardContent } from '@/components/ui/card';
+import EmojiMotion from '@/components/widgets/EmojiMotion.vue';
+import InfoBanner from '@/components/widgets/InfoBanner.vue';
+import { ArrowRight } from '@lucide/vue';
+
+const { t } = useI18n();
+
+const store = useMainStore();
+const configs = computed(() => store.configs);
+const userPreferences = computed(() => store.userPreferences);
+const isSimpleMode = computed(() => userPreferences.value.simpleMode);
+const router = useRouter();
+
+// Card groups behind the deployment gates (original site / configs flag, see
+// utils/tool-availability.js). Reactive on configs, so gated cards appear the
+// moment configs land.
+const cardGroups = computed(() => groupToolsByCategory(
+    listedTools(ADVANCED_TOOLS, configs.value),
+));
+
+// Open a tool's page. Also the keyboard shortcuts' entry point (exposed below).
+const openTool = (slug) => {
+    router.push(`/tools/${slug}`);
+    trackEvent('Nav', 'NavClick', slug);
+};
+
+const onCardClick = (e, slug) => {
+    if (!isPlainClick(e)) return;
+    e.preventDefault();
+    openTool(slug);
+};
+
+onMounted(() => {
+    store.setMountingStatus('AdvancedTools', true);
+});
+
+defineExpose({
+    openTool,
+});
+
+</script>
+
+<style scoped>
+/* Keep acting / hovered / focused cards above upper neighbors while their emoji motion plays */
+.jn-adv-card:hover,
+.jn-adv-card:focus-within,
+.jn-adv-card:has([data-acting='true']) {
+    z-index: 10;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+    .jn-adv-card:is(:hover, :focus-within, [data-keyboard-hover='true']) :deep(.jn-emoji-motion) {
+        translate: -2px -4px;
+        scale: 1.32;
+    }
+}
+</style>

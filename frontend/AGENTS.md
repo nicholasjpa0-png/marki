@@ -1,0 +1,291 @@
+# frontend/AGENTS.md
+
+Conventions specific to the Vue 3 SPA under `frontend/`. Universal rules
+(language, i18n, commits, testing) live in ../AGENTS.md.
+
+## Overview
+
+Vue 3 `<script setup>` + Pinia + vue-router (HTML5 history) + Tailwind CSS v4
+over copied-in shadcn-vue primitives. No TypeScript, no `dark:` dual pairs.
+
+## Layout
+
+```
+frontend/
+├── App.vue / main.js / store.js / router/ / locales/ / style/style.css
+├── firebase-init.js ← env-gated lazy Firebase Auth (boot path: utils/auth-hint.js;
+│                      PWA / blocked-popup redirect sign-in: utils/auth-redirect.js)
+├── sentry-init.js   ← env-gated Sentry (see "Error monitoring")
+├── data/            ← static config (tools registry drives pages+cards+nav)
+├── lib/ · utils/ · composables/  ← see "Helper placement"
+└── components/      ← sections + ip-infos/ speedtest/ advanced-tools/ report/ widgets/ svgicons/ festival/ ui/
+```
+
+Every file opens with a header comment stating its purpose — read those.
+
+## Conventions
+
+- **Composition API** everywhere; no Options API. Alias `@` → `frontend/`.
+- **Shared-with-backend helpers live in `common/`**, re-exported through a thin
+  `utils/` bridge so consumers keep `@/utils/...` imports (`utils/ip/valid-ip.js`,
+  `utils/country-name.js`); a bridge only re-exports. Report code lists and
+  their labels: `utils/codes/` (`ip.js` → `ip-labels.js`). Import direction:
+  root AGENTS.md "Dependency direction".
+- **Helper placement:** Vue reactivity / lifecycle → `composables/` (`useXxx`);
+  otherwise `utils/` (never `use-` prefixed). `lib/` stays shadcn-only. A pure
+  function next to a composable exports from that composable's file.
+- **Inside `utils/`:** app-wide plumbing at its root; IP / ASN data shaping
+  and validation → `ip/` (the IP card's scenario friction included); the
+  report pipeline → `report/` (section titles: `report-sections.js`); the pure
+  layer of one feature (a tool, a section, Pulse) → `features/`; per-source
+  probe modules keep their own dirs (`getips/`, `dnsleaks/`, `persona/`).
+
+### Achievements are event-driven
+
+Components never touch achievements — they emit domain events unconditionally
+(`emitAppEvent('speedtest:finished', {…})`); `data/achievement-rules.js` maps
+events → slugs, `composables/use-achievement-engine.js` owns all guards (rules
+wait for the remote snapshot; pre-sync hits parked). New achievement = entry +
+rule + (only if no suitable event exists) a new event. The shareable report
+rides the same bus: `<domain>:finished` → `use-report-collector.js` →
+`utils/report/report-builders.js` → sections whitelisted by `common/report-schema.js`.
+New reportable test = event + builder + schema entry in one change; new result
+semantics = a code in `common/codes/<domain>.js`, which builder whitelist and
+schema enum both import (builders fail soft, fixtures are frozen: drift =
+quietly missing fields); its label goes in the domain's one code → key map
+(`utils/codes/<domain>-labels.js`), shared by the live view, the report page
+and the Snapshots diff. Report links are public: the builder, not the
+renderer, drops visitor-supplied data (Persona Check: id / axis / verdict,
+never `detail`; Invisibility: key + flag). A `localOnly` schema field
+(scenario friction) is Snapshots-only: the share validator rejects it and
+`buildShareReport` strips it.
+
+### Commands are the imperative twin of events
+
+`utils/app-commands.js`: events say "this happened"; a command says "do this" —
+one owner (`use-app-command.js`, scope-bound, setup-time), and
+`dispatchAppCommand` resolves with its result. Payload = one plain JSON object
+shaped at registration; rejections are `appCommandError(code, message)` with
+reserved `auth` / `quota` / `input` (the bus adds `unavailable` / `timeout`).
+Cross-component triggers use the bus, never template refs (refs stay for UI
+chrome); tools register at setup, callers `waitForAppCommand` first.
+
+### Advanced Tools are pages, kept alive
+
+- Every tool is a page at `/tools/:slug` (`ToolPage.vue` over `data/tools.js`),
+  and every opener routes there: cards are real `<a href>` (a plain click
+  `router.push`es, modified clicks stay the browser's), Nav, shortcuts
+  (`Advanced.vue`'s exposed `openTool`), in-app links. `/?tool=<slug>` is only
+  a replace-redirect in the router's `beforeEach` (`utils/legacy-tool-link.js`).
+- Gates (`requiresOriginalSite`, `requiresConfig: '<configs key>'`, e.g. `asn` →
+  `cloudFlare`) decide listing only, via `isToolAvailable()` / `listedTools()`
+  (card grid, Nav); a `/tools/:slug` link is never gated.
+- `App.vue` keeps Home and `ToolPage` alive (`KeepAlive`); `ToolPage` keeps up
+  to 8 tools alive per slug, dropped on sign-out / account switch
+  (`utils/tool-cache.js`). Back / forward is plain history; the breadcrumb's
+  Home steps back when the previous entry is Home (`utils/back-target.js`), so
+  Home returns as left, scroll included.
+- A cached page never unmounts, so whatever acts on the route, the document
+  head, window events or the store's one-shot triggers gates on
+  `use-route-active.js` (`useRouteActive` / `useActiveValue` /
+  `useActiveEventListener`), not on mount / unmount. Overlays on a page being
+  left are closed by `use-overlay-shortcuts.js` — their portal would outlive it;
+  App.vue's own (store `openSheet`, the `User` dialog) close on a path change.
+- Homepage state reaches a tool page through the store, the app-events
+  collectors and the command bus: a cached Home keeps its commands registered,
+  so a caller dispatches in place and goes home first only when
+  `hasAppCommand()` says Home never mounted (Persona Check, Snapshot History's save).
+
+### ASN Profile
+
+- One `/api/asn-profile` request, one loading state, then the whole page; a
+  section (reputation included — no `configs.originalSite` check) renders only
+  when its `status` is `ok`. `ASNConnectivity.vue` gets `:bordered="false"`
+  (the card draws the border) and keeps its expand-to-drawer; its defaults
+  keep IPCard / QueryIP unchanged.
+- `peeringdb` is operator self-reporting: vocabularies → locale keys
+  (`PEERING_ENUMS`), names / cities as written. `ASN_PROFILE_TIMEOUT_MS` stays
+  above the largest backend section deadline (tested).
+- ASN Info's footer links `/tools/asn?q=AS<n>` (hidden when gated off); in
+  QueryIP it emits `open-tool` via IpDetailPanel so the dialog closes first.
+  The dialog is `widgets/QueryIPDialog.vue` (v-model `open`, optional `ip` to
+  run): Home's FAB and tool pages (Bulk IP Lookup) each mount their own.
+
+### Bulk IP Lookup
+
+Rows live in localStorage (`use-bulk-lookup.js`), geography from
+`/api/bulk-lookup` only: a run is split into requests of `BULK_LOOKUP_MAX_IPS`
+(`common/bulk-lookup-limits.js`), stored as each lands, the rest parked in
+`paused` when a later one fails (Continue sends only those). Overview and
+Clear all cover the whole list; the toolbar under them scopes both tabs
+(`scopedRows`): search with `country:` / `asn:` / `block:` tokens, batch,
+starred. Analysis entries toggle those tokens (`toggleQueryPick`), never a tab
+switch. Anything per IP stays single-IP: a row opens the QueryIP dialog or
+links to the Blocklist tool — no bulk path to the private API.
+
+### Snapshots
+
+Browser-local, per-visit homepage records: `use-snapshot-recorder.js` consumes
+`<domain>:finished` through the report builders; `utils/features/snapshots.js`
+owns storage, retention and schema validation. Read `snapshotsAuto` through
+`snapshotsAutoMode()`; smart-mode rules live in `snapshot-trigger.js`.
+Later results update only this visit's automatic snapshot; visits never
+merge. Manual saves (`use-snapshot-save.js`) are frozen copies; pinned
+snapshots (`kept`) are exempt from retention. Every creation emits
+`snapshot:created`. Two toasts, both App.vue-level `once` requests gated on
+`snapshotsNotifyOn()` (off with recording off): the intro
+(`use-snapshot-intro.js`, after the recorder) — no snapshot at entry and
+this load records one automatically into localStorage → a View toast at
+15 s; and the change notice: the
+recorder emits `snapshot:changed` when this visit's snapshot differs from
+the previous one in what both carry (`notableChanges`, stricter than the
+smart trigger: no new section / target / field; WebRTC going dark counts);
+`use-snapshot-notice.js` queues it, waiting for 35 s or the Speed Test
+section (away from the IP cards' actions). Schema changes can invalidate
+stored data.
+
+`advanced-tools/Snapshots.vue` owns list + detail and URL selection (`q` / `vs`).
+`SnapshotList.vue` is a desktop column / mobile Sheet: static pinned markers,
+text Compare actions; pinning only in the detail panel.
+`snapshot-diff.js` aligns by stable item id, never position or IP source;
+numbers compare as displayed. `snapshot-diff-format.js` → `SnapshotDiff*.vue`
+renders factual −/+ differences, never leak / safe / better / worse verdicts
+or summary chips. Use `--diff-removed` / `--diff-added` and their `-strong`
+variants only here; measurement drift folds while hidden. Keep this pipeline
+separate from Share Report and `Report*.vue`.
+
+### Overlays take no keyboard shortcuts
+
+One dispatcher (`utils/shortcut.js`) over the map `use-shortcuts.js` registers
+(home route only; Home clears it when left; `registerShortcuts()` replaces it),
+suspended while an overlay is open — keyed off form: the `ui/` roots `Dialog` /
+`Sheet` / `Drawer` call `use-overlay-shortcuts.js`, so anything built on them
+inherits it; overlays nest; Esc and native scrolling still work.
+
+### Error monitoring (Sentry) is env-gated and invisible to app code
+
+No `VITE_SENTRY_DSN_FRONTEND`, or a DEV build → no Sentry loaded (gated dynamic
+import, like `firebase-init.js`; all config in `sentry-init.js`). **Never import
+`@sentry/vue` in app code. Explicit signals go through the app-events bus**:
+`ip-source:exhausted` (a card's whole source chain failed), only when another
+card resolved a valid IP of that version. Traps: `console.error` is captured,
+fingerprinted on its first argument — name the failure there; `utils/getips/`
+failures stay `console.warn`. Replay shows page text unmasked by design (input
+masked; in the privacy policy). Extension noise is dropped (`utils/extension-noise.js`:
+extension-scheme `denyUrls` + unhandled rejections through an extension frame).
+No backend 5xx capture; envelopes: `/api/monitoring`.
+
+## UI system
+
+**shadcn-vue first:** `components/ui/`, then the shadcn-vue docs; hand-rolled
+Tailwind only when neither fits. Keep on upstream syncs: `Spinner` +
+`ToolLoadingSkeleton`, `toggle` / `toggle-group`'s `primary` pressed pair,
+`pagination`'s `max-sm:hidden` labels (upstream `hidden sm:block`), the
+overlay roots' shortcut suspension, `select`'s trigger geometry (`py-1` + flex
+value span, not `-webkit-box` — Safari shifts it ~2px). CLI trap: `shadcn-vue
+add` here writes `import { cn } from "cn"` and installs the unrelated `cn`
+package — drop the dependency, import from `@/lib/utils`.
+
+### Design tokens
+
+`style/style.css`: `--info` (waiting) · `--success` (ok-fast) · `--warning`
+(ok-slow; `/50` for ok-mild) · `--action` (run), each with `-foreground`; semantic tokens only,
+never `dark:` pairs. Button adds `action` / `success`; Badge adds `success`,
+hover disabled (wrap it to interact). FAB colors: `action` trigger, `default`
+stateless panel, `success` protective state on, `secondary` dock; ≤ 2 accents.
+
+### Festival theme rides the Pulse festivals, chrome only
+
+With build-time `VITE_FESTIVAL_SKINS="true"`, a Pulse festival in its window
+(`data/pulse-statuses.js`; overlap → the most recently opened festival that
+has a skin folder, else the most recently opened) dresses the site's chrome
+and nothing else: the Pulse entry shows its emoji instead of the globe, and
+its folder `components/festival/<festival id>/`, when it exists, supplies all
+three parts (a skin is all-or-nothing; without the folder the festival is
+emoji-only): lazy `Logo.vue` (over the brand icon, in its viewBox), `NavTrim.vue` (hangs
+below the Nav: corners + sparse hanging pieces, never full-width; not on
+`isMobile`, where it covers the breadcrumb) and
+`FooterTrim.vue` (a full-width garland in the footer's top padding, drawn
+per scallop through `components/festival/Garland.vue`; traits cycle over
+coprime-length lists so no repeat shows). No page effects, no token / color
+changes, no new copy. New skin = that folder (tested against the festival
+ids). `?festival=<id>` previews in DEV only, the Pulse panel's composer chip
+and description included.
+
+### Status tones
+
+Every "business state → color" mapping goes through `use-status-tone.js`
+(`wait` / `active` / `ok-fast` / `ok-mild` / `ok-slow` / `fail`), normally via `ipFieldTone()`.
+
+### Canonical patterns — copy the named exemplar, don't re-invent
+
+- **Trigger button** — `variant="action"` + `<Spinner v-if />` + `:disabled` (QueryIP, Whois).
+- **Input + icon trigger** — flex row, compact icon Button, no text label (QueryIP).
+- **AutoFill-proof inputs** — all six on every free-form Input: `autocomplete`
+  / `autocorrect` / `autocapitalize="off"`, `spellcheck="false"`,
+  `data-1p-ignore`, `data-lpignore="true"`; placeholders avoid "address / 地址
+  / adresse / adresi" (iOS QuickType keys on the word).
+- **Status card** — `keyboard-shortcut-card` (J/K target) `jn-card` (shadow /
+  border / outline) + hover lift (IPCard).
+- **Flag** — always `<Icon :icon="'circle-flags:' + code.toLowerCase()" />`.
+- **Dates & times** — via `utils/time-utils.js` + the vue-i18n locale; no
+  hand-rolled `Intl` / `toLocaleDateString` without a why-comment.
+- **Fit-to-width tokens** — IP / MAC strings in `<FitText>` (`HERO_TIERS` /
+  `INLINE_TIERS`; `:max-lines="2"` on heroes); no length-threshold helpers.
+  The Snapshot diff's mono, segment-highlighted lines excepted.
+- **Filter tags** — `ToggleGroup :spacing="2"` of detached `h-7 rounded-full`
+  pills, `w-full flex-wrap` (DnsResolver, IpCalculator); never `spacing=0`.
+- **Shareable tool input** — watch `useActiveValue(() => route.query.q, {
+  pathOf: () => route.path })` (immediate, so mount, later changes and a `q`
+  changed while cached all run; another page's `q` never does), `router.replace`
+  it on every run (AsnProfile); the URL is `/tools/<slug>?q=`. A `q` runs
+  the tool only when a run needs no sign-in or quota (AsnProfile,
+  IpCalculator); otherwise it just prefills (IpBlocklist).
+- **Fixed option sets** — a closed list wider than one line is a `Select`.
+- **Qualifier + input + run** — `Select` + `Input` in one `ButtonGroup`, the run
+  Button in a second (DnsResolver); trigger `w-auto shrink-0`; never wraps.
+- **Tables vs lists** — real per-column header semantics → `<table>`;
+  otherwise a bordered `<ul class="rounded-lg border bg-card divide-y">`.
+- **Dialog header** — the `<DialogHeader :icon :title />` primitive.
+- **Toasts** — an immediate one is `store.setAlert`; one that waits, updates
+  in place or shows once per page load is `store.queueToast` (plain object;
+  `when: { delayMs, reach }` = `use-attention-gate.js`, `action.to` a route,
+  `track` / `action.track` = `trackEvent` args on show / click),
+  run by `use-toast-queue.js` in `Toast.vue` — never feature code there.
+- **Site navigation** — one `Nav.vue` in `App.vue` above every route (fixed;
+  `index.html` pads the body for it), never per page; `User` / `Preferences`
+  sit beside it, one each. What a click does on the current route is
+  `resolveNavTarget()` (`utils/nav-target.js`: scroll on Home, go home then
+  scroll elsewhere, a tool → its page), carried out by `use-nav-target.js`;
+  no section is highlighted off Home.
+  - The link row collapses to the hamburger + Sheet when `use-nav-overflow.js`
+    measures it doesn't fit (no breakpoint); `isMobile` only drives phone behaviour.
+- **Footer** — four columns on the Advanced Tools grid: brand / Project / Docs
+  & Support / Clients (only the CLI entry is gated, on the curl domains);
+  never repeats on-page content (tools, sections); the static shell renders in
+  `Footer.vue`, while About / Changelog / Acknowledgement and the CLI dialog
+  load lazily in `widgets/Footer*.vue` when opened.
+- **Page breadcrumb** — every page but Home opens its body with
+  `<PageBreadcrumb :items />` above the `<h1>` (← Home / … / current page):
+  real links, Home via `resolveBackTarget()`, section crumbs via the Nav's
+  helper, a bare last crumb `aria-current="page"`. A tool page ends on the
+  Advanced Tools crumb: its `<h1>` already names the tool.
+- **Page transitions** — View Transitions hooked in the router's
+  `beforeResolve` (`utils/page-transition.js`: Home → page slides forward,
+  → Home back, page → page fades; keyframes in `style/style.css`); none on a
+  query-only change, the first load, reduced motion or a history step the
+  browser animated itself. Only the Nav has a `view-transition-name` (it
+  stays still). After a history step, `utils/revive-animations.js` replays
+  the page's running CSS animations: iOS swipe-back leaves them frozen.
+- **Responsive hide** — `.hidden` is `!important` (`style/style.css`), so
+  `hidden sm:flex` never shows: write `max-sm:hidden`.
+- **Drawer vs Sheet** — bottom Drawer only for a full-bleed expansion of an
+  inline visual (ASNConnectivity's graph); side panels use `Sheet`; a tool is
+  a page, never an overlay.
+- **Motion** — hover lift `transition-transform duration-300 ease-out
+  hover:-translate-y-1.5`; loading is `<Spinner />`, never pulse-dots.
+
+## Testing
+
+Composables and utils are the target (`tests/composable-*.test.js`); rendering /
+browser APIs are out of scope — visual changes need the user in `pnpm dev`.
